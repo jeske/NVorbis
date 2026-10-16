@@ -65,16 +65,42 @@ namespace NVorbis.Ogg
 
             if (pageIndex <= _reader.FirstDataPageIndex)
             {
-                // We are on the very first audio page (or somehow before it). There is no
-                // preceding audio page to validate granule positions against, so skip the
-                // complex FindPacket logic and snap directly to the stream beginning.
-                // GetStreamStartGranule resolves the first real audio packet's index (skipping
-                // a header tail spilled onto this page, if any -- issue #37) and the stream's
-                // true start granule, which isn't necessarily zero (e.g. a stream cut or
-                // captured mid-broadcast -- issue #35).
+                // We are on the very first audio page (or somehow before it). There is no preceding
+                // audio page to validate granule positions against, so FindPacket's cross-page checks
+                // don't apply; but the page can still hold MANY packets -- e.g. ffmpeg's Ogg muxer fills
+                // the first audio page to its size limit, ~1 s of audio at speech bitrates -- so we must
+                // still locate the packet containing granulePos rather than snap to the stream start.
+                // GetStreamStartGranule resolves the first real audio packet's index (skipping a header
+                // tail spilled onto this page, if any -- issue #37) and the stream's true start granule,
+                // which isn't necessarily zero (stream cut / captured mid-broadcast -- issue #35).
                 pageIndex = _reader.FirstDataPageIndex;
-                granulePos = GetStreamStartGranule(getPacketGranuleCount);
-                packetIndex = _firstAudioPacketIndex;
+                var streamStartGranule = GetStreamStartGranule(getPacketGranuleCount);
+                if (granulePos <= streamStartGranule)
+                {
+                    granulePos = streamStartGranule;
+                    packetIndex = _firstAudioPacketIndex;
+                }
+                else
+                {
+                    // gps[i] is the granule at which packet i's output ENDS (computed backward from the page
+                    // granule); the first audio packet emits nothing, so gps[_firstAudioPacketIndex] is the
+                    // stream start and packet i's output starts at gps[i - 1].
+                    var (gps, _) = GetTargetPageInfo(pageIndex, _firstAudioPacketIndex, 0, getPacketGranuleCount);
+                    var target = _firstAudioPacketIndex + 1;
+                    while (target < gps.Length && gps[target] < granulePos)
+                    {
+                        ++target;
+                    }
+                    if (target >= gps.Length)
+                    {
+                        // FindPage said this page, but its packets end before granulePos: inconsistent page
+                        // accounting; land on the last packet rather than fail.
+                        target = gps.Length - 1;
+                    }
+                    granulePos = Math.Max(streamStartGranule, gps[target - 1]);
+                    // apply the pre-roll, never reaching back past the first audio packet (which is its own pre-roll)
+                    packetIndex = Math.Max(_firstAudioPacketIndex, target - preRoll);
+                }
             }
             else
             {
