@@ -86,6 +86,18 @@ namespace NVorbis.Ogg
                     // granule); the first audio packet emits nothing, so gps[_firstAudioPacketIndex] is the
                     // stream start and packet i's output starts at gps[i - 1].
                     var (gps, _) = GetTargetPageInfo(pageIndex, _firstAudioPacketIndex, 0, getPacketGranuleCount);
+
+                    // When the first data page is ALSO the last page (single-page stream), its granule is the
+                    // EOS-trimmed end, so the backward sum over-counts and every gps[i] sits below its true
+                    // value by the trim (observed: -538 / -198 on 1test.ogg / pop-2.ogg).  The stream start
+                    // is the one anchor we have (GetStreamStartGranule already clamps it); re-base the table
+                    // on it.  A no-op when the page granule is exact (gps[first] == streamStart).
+                    var shift = streamStartGranule - gps[_firstAudioPacketIndex];
+                    if (shift != 0)
+                    {
+                        for (var i = _firstAudioPacketIndex; i < gps.Length; i++) gps[i] += shift;
+                    }
+
                     var target = _firstAudioPacketIndex + 1;
                     while (target < gps.Length && gps[target] < granulePos)
                     {
@@ -222,11 +234,14 @@ namespace NVorbis.Ogg
                 else
                 {
                     // backward calculation over-counted samples (e.g., EOS-clipped last page);
-                    // shift gps up to align with the known previous-page boundary
+                    // shift gps up to align with the known previous-page boundary -- INCLUDING endGP,
+                    // which is returned as the start granule when the target is in the page's first
+                    // packet (otherwise that seek rolls forward by the over-count and plays wrong audio)
                     for (var i = 0; i < gps.Length; i++)
                     {
                         gps[i] -= diff;
                     }
+                    endGP = lastPageGranulePos;
                 }
             }
 
